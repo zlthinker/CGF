@@ -9,6 +9,7 @@ with np.load(input_np) as fin:
 		data = fin['data']
 		number = data.shape[0]
 		dim = data.shape[1]
+		fout.write(str(number) + '\n')
 		for n in range(number):
 			for d in range(dim):
 				fout.write(str(data[n][d]) + ' ')
