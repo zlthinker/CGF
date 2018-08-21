@@ -43,6 +43,7 @@ void usage(const char* program)
 
 vector<vector<double> > compute_intensities(pcl::PointCloud<pcl::PointXYZ>::Ptr cloud, 
                                             pcl::PointCloud<pcl::PointNormal>::Ptr normals,
+                                            pcl::PointCloud<pcl::PointXYZ>::Ptr keypoint_cloud,
                                             int num_bins_radius, 
                                             int num_bins_polar,
                                             int num_bins_azimuth,
@@ -52,15 +53,16 @@ vector<vector<double> > compute_intensities(pcl::PointCloud<pcl::PointXYZ>::Ptr 
                                             int num_threads)
 {
     vector<vector<double> > intensities;
-    intensities.resize(cloud->points.size());
+    intensities.resize(keypoint_cloud->points.size());
     
     pcl::search::KdTree<pcl::PointXYZ>::Ptr tree(new pcl::search::KdTree<pcl::PointXYZ>());
     tree->setInputCloud(cloud);
 
     pcl::PointCloud<pcl::ReferenceFrame>::Ptr frames(new pcl::PointCloud<pcl::ReferenceFrame>());
-    pcl::SHOTLocalReferenceFrameEstimation<pcl::PointXYZ>::Ptr lrf_estimator(new pcl::SHOTLocalReferenceFrameEstimation<pcl::PointXYZ>());
+    pcl::SHOTLocalReferenceFrameEstimationOMP<pcl::PointXYZ>::Ptr lrf_estimator(new pcl::SHOTLocalReferenceFrameEstimationOMP<pcl::PointXYZ>());
     lrf_estimator->setRadiusSearch(lrf_radius);
-    lrf_estimator->setInputCloud(cloud);
+    lrf_estimator->setSearchSurface(cloud);
+    lrf_estimator->setInputCloud(keypoint_cloud);
     
     lrf_estimator->compute(*frames);
 
@@ -93,16 +95,29 @@ vector<vector<double> > compute_intensities(pcl::PointCloud<pcl::PointXYZ>::Ptr 
         integr_polar.push_back(cos(pcl::deg2rad(polar_division[i]))-cos(pcl::deg2rad(polar_division[i+1])));
     }  
 
-//#ifdef _OPENMP
-//#pragma omp parallel for num_threads(num_threads)
-//#endif
-    for(int i = 0; i < cloud->points.size(); i++) {
+#ifdef _OPENMP
+#pragma omp parallel for num_threads(num_threads)
+#endif
+    for(int i = 0; i < keypoint_cloud->points.size(); i++) {
         vector<int> indices;
         vector<float> distances;
         vector<double> intensity;
         int sum = 0;
         intensity.resize(num_bins_radius * num_bins_polar * num_bins_azimuth);
- 
+        fill(intensity.begin(), intensity.end(), 0);
+
+        tree->radiusSearch(keypoint_cloud->points[i], search_radius, indices, distances);
+
+	if (indices.size() == 0)
+	{
+		intensities[i] = vector<double>(num_bins_radius * num_bins_polar * num_bins_azimuth, 0.0);
+		continue;
+	}
+
+        int indice = indices[0];
+        //std::cout << i << ", indice: " << indice << "\t, dist: " << distances[0] << "\n";
+        //std::cout << "# indices: " << indices.size() << "\n";
+
         pcl::ReferenceFrame current_frame = (*frames)[i];
         Eigen::Vector4f current_frame_x (current_frame.x_axis[0], current_frame.x_axis[1], current_frame.x_axis[2], 0);
         Eigen::Vector4f current_frame_y (current_frame.y_axis[0], current_frame.y_axis[1], current_frame.y_axis[2], 0);
@@ -113,7 +128,7 @@ vector<vector<double> > compute_intensities(pcl::PointCloud<pcl::PointXYZ>::Ptr 
             current_frame_y[0] = 0, current_frame_y[1] = 1, current_frame_y[2] = 0;  
             current_frame_z[0] = 0, current_frame_z[1] = 0, current_frame_z[2] = 1;  
         } else {
-            float nx = normals->points[i].normal_x, ny = normals->points[i].normal_y, nz = normals->points[i].normal_z;
+            float nx = normals->points[indice].normal_x, ny = normals->points[indice].normal_y, nz = normals->points[indice].normal_z;
             Eigen::Vector4f n(nx, ny, nz, 0);
             if(current_frame_z.dot(n) < 0) {
                 current_frame_x = -current_frame_x;
@@ -121,17 +136,16 @@ vector<vector<double> > compute_intensities(pcl::PointCloud<pcl::PointXYZ>::Ptr 
                 current_frame_z = -current_frame_z;
             }
         }
-    
-        fill(intensity.begin(), intensity.end(), 0);
-        tree->radiusSearch(cloud->points[i], search_radius, indices, distances);
+
         for(int j = 1; j < indices.size(); j++) {
             if(distances[j] > 1E-15) {
-                Eigen::Vector4f v = cloud->points[indices[j]].getVector4fMap() - cloud->points[i].getVector4fMap(); 
+                Eigen::Vector4f v = cloud->points[indices[j]].getVector4fMap() - cloud->points[indice].getVector4fMap();
                 double x_l = (double)v.dot(current_frame_x);
                 double y_l = (double)v.dot(current_frame_y);
                 double z_l = (double)v.dot(current_frame_z);
                 
                 double r = sqrt(x_l*x_l + y_l*y_l + z_l*z_l);
+		if (r < 1E-8) { r = 1; }
                 double theta = pcl::rad2deg(acos(z_l / r));
                 double phi = pcl::rad2deg(atan2(y_l, x_l));
                 int bin_r = int((num_bins_radius - 1) * (log(r) - ln_rmin) / ln_rmax_rmin + 1);
@@ -158,6 +172,24 @@ vector<vector<double> > compute_intensities(pcl::PointCloud<pcl::PointXYZ>::Ptr 
     return intensities;
 }
 
+void ReadKeypointCloud(std::string const & keypoint_file,
+                       pcl::PointCloud<pcl::PointXYZ>::Ptr & keypoint_cloud)
+{
+    std::ifstream fin(keypoint_file);
+    size_t kpt_num;
+    if (fin.is_open())
+    {
+        fin >> kpt_num;
+        for (int i = 0; i < kpt_num; i++)
+        {
+            float x, y, z, scale, angle, response, octave;
+            fin >> x >> y >> z >> scale >> angle >> response >> octave;
+            pcl::PointXYZ point(x, y, z);
+            keypoint_cloud->push_back(point);
+        }
+    }
+}
+
 int main(int argc, char* argv[])
 {
     int num_bins_radius = 17, num_bins_polar = 11, num_bins_azimuth = 12;
@@ -166,6 +198,7 @@ int main(int argc, char* argv[])
     double diameter = 4*sqrt(3);
     double rmin = 0.1;
     string output_file;
+    string keypoint_file;
  
     if(pcl::console::find_argument(argc, argv, "-h") >= 0 || argc == 1) {
         usage(argv[0]);
@@ -181,6 +214,7 @@ int main(int argc, char* argv[])
     pcl::console::parse_argument(argc, argv, "-o", output_file);
     pcl::console::parse_argument(argc, argv, "-t", num_threads);
     pcl::console::parse_argument(argc, argv, "-d", diameter);
+    pcl::console::parse_argument(argc, argv, "-kpt", keypoint_file);
 
     bool relative_scale = pcl::console::find_argument(argc, argv, "--relative") >= 0;
     std::cout << relative_scale << std::endl;
@@ -192,6 +226,7 @@ int main(int argc, char* argv[])
 
     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>);
     pcl::PointCloud<pcl::PointNormal>::Ptr cloud_with_normals(new pcl::PointCloud<pcl::PointNormal>);
+     pcl::PointCloud<pcl::PointXYZ>::Ptr keypoint_cloud(new pcl::PointCloud<pcl::PointXYZ>);
 
     ofstream fout(output_file.c_str(), ios::binary);
     vector<double> intensities_flat;
@@ -207,10 +242,16 @@ int main(int argc, char* argv[])
         PCL_ERROR("Could not read file.");
         return 1;
     }
-    vector<vector<double> > intensities = compute_intensities(cloud, cloud_with_normals,
+    std::cout << "Read keypoint file: " << keypoint_file << "\n";
+    ReadKeypointCloud(keypoint_file, keypoint_cloud);
+    std::cout << "Read keypoint file finished.\n";
+
+    vector<vector<double> > intensities = compute_intensities(cloud, cloud_with_normals, keypoint_cloud,
                                                               num_bins_radius, num_bins_polar, num_bins_azimuth, 
                                                               search_radius, lrf_radius, 
                                                               rmin, num_threads);
+    std::cout << "Compute intensity finished.\n";
+    std::cout << "# intensities: " << intensities.size() << "\n";
     for(int i = 0; i < intensities.size(); i++) {
         for(int j = 0; j < intensities[i].size(); j++) {
             intensities_flat.push_back(intensities[i][j]);
@@ -223,10 +264,13 @@ int main(int argc, char* argv[])
         
     vector<unsigned char> intensities_bytes;
     intensities_bytes.resize(intensities_flat.size()*sizeof(double));
+    std::cout << "# bytes: " << intensities_bytes.size() << "\n";
     memcpy(&intensities_bytes[0], &intensities_flat[0], intensities_flat.size()*sizeof(double));
     vector<unsigned char> intensities_compressed;
     intensities_compressed.resize(intensities_bytes.size()); 
+    std::cout << "Before lzf compress.\n";
     size_t compressed_len = lzf_compress(&intensities_bytes[0], intensities_bytes.size(), &intensities_compressed[0], intensities_bytes.size());
+    std::cout << "After lzf compress.\n";
     fout.write(reinterpret_cast<const char*>(&intensities_compressed[0]), compressed_len);
     fout.close();
     return 0;

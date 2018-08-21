@@ -35,14 +35,14 @@ def main(argv):
     feature_len = int(argv[1])
     output_name = argv[2]
 
-    features_path = path + features
+    #features_path = path + features
          
     data = decompress(features_path, 'd', 8, feature_len)
 
     start = time.time()
-    np.savez_compressed(path + '/' + output_name, data=data)
+    np.savez_compressed(output_name, data=data)
     print 'Compress time {0}'.format(time.time() - start)     
-    print 'Wrote file {0}.npz in folder {1}.'.format(output_name, path)
+    print 'Wrote file {0}.npz.'.format(output_name)
 
 if __name__ == '__main__':
     main(sys.argv[1:])
